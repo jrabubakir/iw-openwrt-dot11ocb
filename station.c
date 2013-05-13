@@ -29,13 +29,74 @@ enum plink_actions {
 	PLINK_ACTION_BLOCK,
 };
 
+static void print_sta_bitrate(struct nlattr *nla, const char *name)
+{
+	struct nlattr *rinfo[NL80211_RATE_INFO_MAX + 1];
+
+	static struct nla_policy rate_policy[NL80211_RATE_INFO_MAX + 1] = {
+		[NL80211_RATE_INFO_BITRATE] = { .type = NLA_U16 },
+		[NL80211_RATE_INFO_BITRATE32] = { .type = NLA_U32 },
+		[NL80211_RATE_INFO_MCS] = { .type = NLA_U8 },
+		[NL80211_RATE_INFO_40_MHZ_WIDTH] = { .type = NLA_FLAG },
+		[NL80211_RATE_INFO_SHORT_GI] = { .type = NLA_FLAG },
+	};
+
+	if (!nla)
+		return;
+
+	if (nla_parse_nested(rinfo, NL80211_RATE_INFO_MAX, nla, rate_policy)) {
+		fprintf(stderr, "failed to parse nested rate attributes!\n");
+	} else {
+		int rate = 0;
+		printf("\n\t%s:\t", name);
+		if (rinfo[NL80211_RATE_INFO_BITRATE32])
+			rate = nla_get_u32(rinfo[NL80211_RATE_INFO_BITRATE32]);
+		else if (rinfo[NL80211_RATE_INFO_BITRATE])
+			rate = nla_get_u16(rinfo[NL80211_RATE_INFO_BITRATE]);
+		if (rate > 0)
+			printf("%d.%d MBit/s", rate / 10, rate % 10);
+
+		if (rinfo[NL80211_RATE_INFO_MCS])
+			printf(" MCS %d", nla_get_u8(rinfo[NL80211_RATE_INFO_MCS]));
+		if (rinfo[NL80211_RATE_INFO_40_MHZ_WIDTH])
+			printf(" 40Mhz");
+		if (rinfo[NL80211_RATE_INFO_SHORT_GI])
+			printf(" short GI");
+	}
+}
+
+static char *get_chain_signal(struct nlattr *attr_list)
+{
+	struct nlattr *attr;
+	static char buf[64];
+	char *cur = buf;
+	int i = 0, rem;
+	const char *prefix;
+
+	if (!attr_list)
+		return "";
+
+	nla_for_each_nested(attr, attr_list, rem) {
+		if (i++ > 0)
+			prefix = ", ";
+		else
+			prefix = "[";
+
+		cur += snprintf(cur, sizeof(buf) - (cur - buf), "%s%d", prefix,
+				(int8_t) nla_get_u8(attr));
+	}
+
+	if (i)
+		snprintf(cur, sizeof(buf) - (cur - buf), "] ");
+
+	return buf;
+}
 
 static int print_sta_handler(struct nl_msg *msg, void *arg)
 {
 	struct nlattr *tb[NL80211_ATTR_MAX + 1];
 	struct genlmsghdr *gnlh = nlmsg_data(nlmsg_hdr(msg));
 	struct nlattr *sinfo[NL80211_STA_INFO_MAX + 1];
-	struct nlattr *rinfo[NL80211_RATE_INFO_MAX + 1];
 	char mac_addr[20], state_name[10], dev[20];
 	struct nl80211_sta_flag_update *sta_flags;
 	static struct nla_policy stats_policy[NL80211_STA_INFO_MAX + 1] = {
@@ -47,6 +108,7 @@ static int print_sta_handler(struct nl_msg *msg, void *arg)
 		[NL80211_STA_INFO_SIGNAL] = { .type = NLA_U8 },
 		[NL80211_STA_INFO_T_OFFSET] = { .type = NLA_U64 },
 		[NL80211_STA_INFO_TX_BITRATE] = { .type = NLA_NESTED },
+		[NL80211_STA_INFO_RX_BITRATE] = { .type = NLA_NESTED },
 		[NL80211_STA_INFO_LLID] = { .type = NLA_U16 },
 		[NL80211_STA_INFO_PLID] = { .type = NLA_U16 },
 		[NL80211_STA_INFO_PLINK_STATE] = { .type = NLA_U8 },
@@ -54,15 +116,10 @@ static int print_sta_handler(struct nl_msg *msg, void *arg)
 		[NL80211_STA_INFO_TX_FAILED] = { .type = NLA_U32 },
 		[NL80211_STA_INFO_STA_FLAGS] =
 			{ .minlen = sizeof(struct nl80211_sta_flag_update) },
+		[NL80211_STA_INFO_CHAIN_SIGNAL] = { .type = NLA_NESTED },
+		[NL80211_STA_INFO_CHAIN_SIGNAL_AVG] = { .type = NLA_NESTED },
 	};
-
-	static struct nla_policy rate_policy[NL80211_RATE_INFO_MAX + 1] = {
-		[NL80211_RATE_INFO_BITRATE] = { .type = NLA_U16 },
-		[NL80211_RATE_INFO_BITRATE32] = { .type = NLA_U32 },
-		[NL80211_RATE_INFO_MCS] = { .type = NLA_U8 },
-		[NL80211_RATE_INFO_40_MHZ_WIDTH] = { .type = NLA_FLAG },
-		[NL80211_RATE_INFO_SHORT_GI] = { .type = NLA_FLAG },
-	};
+	char *chain;
 
 	nla_parse(tb, NL80211_ATTR_MAX, genlmsg_attrdata(gnlh, 0),
 		  genlmsg_attrlen(gnlh, 0), NULL);
@@ -109,38 +166,25 @@ static int print_sta_handler(struct nl_msg *msg, void *arg)
 	if (sinfo[NL80211_STA_INFO_TX_FAILED])
 		printf("\n\ttx failed:\t%u",
 			nla_get_u32(sinfo[NL80211_STA_INFO_TX_FAILED]));
+
+	chain = get_chain_signal(sinfo[NL80211_STA_INFO_CHAIN_SIGNAL]);
 	if (sinfo[NL80211_STA_INFO_SIGNAL])
-		printf("\n\tsignal:  \t%d dBm",
-			(int8_t)nla_get_u8(sinfo[NL80211_STA_INFO_SIGNAL]));
+		printf("\n\tsignal:  \t%d %sdBm",
+			(int8_t)nla_get_u8(sinfo[NL80211_STA_INFO_SIGNAL]),
+			chain);
+
+	chain = get_chain_signal(sinfo[NL80211_STA_INFO_CHAIN_SIGNAL_AVG]);
 	if (sinfo[NL80211_STA_INFO_SIGNAL_AVG])
-		printf("\n\tsignal avg:\t%d dBm",
-			(int8_t)nla_get_u8(sinfo[NL80211_STA_INFO_SIGNAL_AVG]));
+		printf("\n\tsignal avg:\t%d %sdBm",
+			(int8_t)nla_get_u8(sinfo[NL80211_STA_INFO_SIGNAL_AVG]),
+			chain);
+
 	if (sinfo[NL80211_STA_INFO_T_OFFSET])
 		printf("\n\tToffset:\t%lld us",
 			(unsigned long long)nla_get_u64(sinfo[NL80211_STA_INFO_T_OFFSET]));
 
-	if (sinfo[NL80211_STA_INFO_TX_BITRATE]) {
-		if (nla_parse_nested(rinfo, NL80211_RATE_INFO_MAX,
-				     sinfo[NL80211_STA_INFO_TX_BITRATE], rate_policy)) {
-			fprintf(stderr, "failed to parse nested rate attributes!\n");
-		} else {
-			int rate = 0;
-			printf("\n\ttx bitrate:\t");
-			if (rinfo[NL80211_RATE_INFO_BITRATE32])
-				rate = nla_get_u32(rinfo[NL80211_RATE_INFO_BITRATE32]);
-			else if (rinfo[NL80211_RATE_INFO_BITRATE])
-				rate = nla_get_u16(rinfo[NL80211_RATE_INFO_BITRATE]);
-			if (rate > 0)
-				printf("%d.%d MBit/s", rate / 10, rate % 10);
-
-			if (rinfo[NL80211_RATE_INFO_MCS])
-				printf(" MCS %d", nla_get_u8(rinfo[NL80211_RATE_INFO_MCS]));
-			if (rinfo[NL80211_RATE_INFO_40_MHZ_WIDTH])
-				printf(" 40Mhz");
-			if (rinfo[NL80211_RATE_INFO_SHORT_GI])
-				printf(" short GI");
-		}
-	}
+	print_sta_bitrate(sinfo[NL80211_STA_INFO_TX_BITRATE], "tx bitrate");
+	print_sta_bitrate(sinfo[NL80211_STA_INFO_RX_BITRATE], "rx bitrate");
 
 	if (sinfo[NL80211_STA_INFO_LLID])
 		printf("\n\tmesh llid:\t%d",
@@ -223,7 +267,7 @@ static int print_sta_handler(struct nl_msg *msg, void *arg)
 		}
 
 		if (sta_flags->mask & BIT(NL80211_STA_FLAG_TDLS_PEER)) {
-			printf("\n\tTDLS peer:\t\t");
+			printf("\n\tTDLS peer:\t");
 			if (sta_flags->set & BIT(NL80211_STA_FLAG_TDLS_PEER))
 				printf("yes");
 			else
